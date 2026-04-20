@@ -1,0 +1,1058 @@
+[
+    {
+        "id": "3b781ccbf12f8cad",
+        "type": "tab",
+        "label": "Flow 1",
+        "disabled": false,
+        "info": "",
+        "env": []
+    },
+    {
+        "id": "2d9584c8b1a14aca",
+        "type": "influxdb out",
+        "z": "3b781ccbf12f8cad",
+        "influxdb": "22d1113c695db1b2",
+        "name": "sendDataInfluxdb",
+        "measurement": "flujo_agua_proyecto",
+        "precision": "",
+        "retentionPolicy": "",
+        "database": "database",
+        "precisionV18FluxV20": "s",
+        "retentionPolicyV18Flux": "",
+        "org": "flujo",
+        "bucket": "proyectoFlujoDB",
+        "x": 930,
+        "y": 100,
+        "wires": []
+    },
+    {
+        "id": "209d86b5970de237",
+        "type": "function",
+        "z": "3b781ccbf12f8cad",
+        "name": "conversion",
+        "func": "msg.tags = {\n    dispositivo: \"ESP32\",\n    ubicacion: \"sala_maquinas\"\n};\n\nmsg.fields = {\n    flujo: Number(msg.payload.flujo),\n    litros: Number(msg.payload.litros),\n    acumulado: Number(msg.payload.acumulado)\n};\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 730,
+        "y": 100,
+        "wires": [
+            [
+                "2d9584c8b1a14aca"
+            ]
+        ]
+    },
+    {
+        "id": "d3704812ba7a0e8b",
+        "type": "function",
+        "z": "3b781ccbf12f8cad",
+        "name": "función detección anomalia",
+        "func": "var ultimoReset = flow.get('reset_deteccion') || 0;\nvar resetVisto = context.get('resetVisto') || 0;\n\nif (ultimoReset > resetVisto) {\n    context.set('resetVisto', ultimoReset);\n    context.set('inicioFlujo', null);\n    context.set('alertaEnviada', false);\n}\n\nvar flujo = Number(msg.payload.flujo);\nvar ahora = new Date();\n// Ajuste zona horaria Colombia UTC-5\nvar offsetColombia = -5 * 60; // minutos\nvar utcMinutos = ahora.getUTCHours() * 60 + ahora.getUTCMinutes();\nvar localMinutos = ((utcMinutos + offsetColombia) + 1440) % 1440;\nvar hora = Math.floor(localMinutos / 60);\nvar minuto = localMinutos % 60;\n\nvar horaInicioStr = flow.get('hora_inicio');\nvar horaFinStr = flow.get('hora_fin');\nvar duracionSegundos = flow.get('duracion_fuga');\nvar valor = flow.get('duracion_valor');\nvar unidad = flow.get('duracion_unidad');\n\n// ✅ DIAGNÓSTICO 1: ver qué llega\nnode.warn(\"VALORES | flujo=\" + flujo +\n    \" | horaInicio=\" + horaInicioStr +\n    \" | horaFin=\" + horaFinStr +\n    \" | durFuga=\" + duracionSegundos +\n    \" | valor=\" + valor +\n    \" | unidad=\" + unidad);\n\nif (!horaInicioStr || !horaFinStr) {\n    node.warn(\"SALIDA: falta hora inicio o fin\");\n    return null;\n}\nif (!duracionSegundos || !valor || !unidad) {\n    node.warn(\"SALIDA: falta duracion\");\n    return null;\n}\n\nvar DURACION_ANOMALIA_MS = duracionSegundos * 1000;\n\nvar hInicio = Number(horaInicioStr.split(':')[0]);\nvar mInicio = Number(horaInicioStr.split(':')[1]);\nvar hFin = Number(horaFinStr.split(':')[0]);\nvar mFin = Number(horaFinStr.split(':')[1]);\n\nvar minutosActual = hora * 60 + minuto;\nvar minutosInicio = hInicio * 60 + mInicio;\nvar minutosFin = hFin * 60 + mFin;\n\nvar esHorarioEvaluacion;\nif (minutosInicio < minutosFin) {\n    esHorarioEvaluacion = (minutosActual >= minutosInicio && minutosActual < minutosFin);\n} else {\n    esHorarioEvaluacion = (minutosActual >= minutosInicio || minutosActual < minutosFin);\n}\n\n// ✅ DIAGNÓSTICO 2: ver si la hora actual está dentro del rango\nnode.warn(\"HORARIO | actual=\" + hora + \":\" + minuto +\n    \" | minutosActual=\" + minutosActual +\n    \" | minutosInicio=\" + minutosInicio +\n    \" | minutosFin=\" + minutosFin +\n    \" | esHorario=\" + esHorarioEvaluacion);\n\nvar UMBRAL_MINIMO = 0.07;\n\nif (flujo >= UMBRAL_MINIMO && esHorarioEvaluacion) {\n    var inicio = context.get('inicioFlujo');\n    if (inicio === null || inicio === undefined) {\n        inicio = ahora.getTime();\n        context.set('inicioFlujo', inicio);\n    }\n\n    var duracionMs = ahora.getTime() - inicio;\n    node.warn(\"⏱ duracionMs=\" + duracionMs + \" | necesita=\" + DURACION_ANOMALIA_MS);\n\n    if (duracionMs >= DURACION_ANOMALIA_MS) {\n        var alertaEnviada = context.get('alertaEnviada') || false;\n        if (!alertaEnviada) {\n            context.set('alertaEnviada', true);\n            msg.to = \"laurasofiaayalamartinez@gmail.com\";\n            msg.topic = '⚠️ ALERTA: Posible anomalía de consumo de agua';\n            msg.payload =\n                '⚠️ ALERTA DE AGUA\\n\\n' +\n                'Flujo detectado: ' + flujo + ' L/min\\n' +\n                'Horario evaluado: ' + horaInicioStr + ' - ' + horaFinStr + '\\n' +\n                'Flujo activo por más de: ' + valor + ' ' + unidad + '\\n' +\n                'Posible fuga o llave abierta.\\n\\n' +\n                'Sistema IoT - Bucaramanga';\n            return msg;\n        }\n    }\n} else {\n    node.warn(\"SALIDA: flujo=\" + flujo + \" < umbral o fuera de horario. esHorario=\" + esHorarioEvaluacion);\n    context.set('inicioFlujo', null);\n    context.set('alertaEnviada', false);\n}\n\nreturn null;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 780,
+        "y": 160,
+        "wires": [
+            [
+                "015d1263ceb2e156",
+                "0928708e60c10a82"
+            ]
+        ]
+    },
+    {
+        "id": "230c6e4cfd774bb5",
+        "type": "ui_gauge",
+        "z": "3b781ccbf12f8cad",
+        "name": "",
+        "group": "7de9bc542d2507ae",
+        "order": 35,
+        "width": 8,
+        "height": 7,
+        "gtype": "gage",
+        "title": "Calibre",
+        "label": "L/min",
+        "format": "{{value}}",
+        "min": 0,
+        "max": "10",
+        "colors": [
+            "#00b500",
+            "#e6e600",
+            "#ca3838"
+        ],
+        "seg1": "2",
+        "seg2": "5",
+        "diff": false,
+        "className": "",
+        "x": 880,
+        "y": 400,
+        "wires": []
+    },
+    {
+        "id": "f04550fa22f1262f",
+        "type": "ui_chart",
+        "z": "3b781ccbf12f8cad",
+        "name": "",
+        "group": "7de9bc542d2507ae",
+        "order": 24,
+        "width": 8,
+        "height": 5,
+        "label": "Gráfico",
+        "chartType": "line",
+        "legend": "false",
+        "xformat": "HH:mm:ss",
+        "interpolate": "linear",
+        "nodata": "",
+        "dot": false,
+        "ymin": "",
+        "ymax": "",
+        "removeOlder": 1,
+        "removeOlderPoints": "",
+        "removeOlderUnit": "3600",
+        "cutout": 0,
+        "useOneColor": false,
+        "useUTC": false,
+        "colors": [
+            "#1f77b4",
+            "#aec7e8",
+            "#ff7f0e",
+            "#2ca02c",
+            "#98df8a",
+            "#d62728",
+            "#ff9896",
+            "#9467bd",
+            "#c5b0d5"
+        ],
+        "outputs": 1,
+        "useDifferentColor": false,
+        "className": "",
+        "x": 880,
+        "y": 460,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "4a29f2ff9a5e6ed7",
+        "type": "ui_template",
+        "z": "3b781ccbf12f8cad",
+        "group": "7de9bc542d2507ae",
+        "name": "Boton Historico Grafana",
+        "order": 51,
+        "width": 4,
+        "height": 2,
+        "format": "<div style=\"justify-content: center;\">\n  <md-button class=\"md-raised md-primary\" ng-click=\"vm.ir()\"\n    style=\"background:#e74c3c; border-radius:30px; padding:10px 30px; margin:0;\">\n    Histórico Grafana\n  </md-button>\n</div>\n\n<script>\n(function(scope) {\n  scope.vm = {\n    destino: \"http://3.150.188.167:3000/public-dashboards/4922a06cf54d4e4cb6d41f25887985cb\",\n    ir: function() {\n      var url = scope.vm.destino.trim();\n      if (!url) return;\n      if (!/^https?:\\/\\//i.test(url)) url = \"http://\" + url;\n      window.open(url, \"_blank\");\n    }\n  };\n})(scope);\n</script>",
+        "storeOutMessages": true,
+        "fwdInMessages": true,
+        "resendOnRefresh": true,
+        "templateScope": "local",
+        "className": "",
+        "x": 930,
+        "y": 520,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "e98ab284994c5953",
+        "type": "function",
+        "z": "3b781ccbf12f8cad",
+        "name": "Flujo",
+        "func": "msg.payload = msg.payload.flujo;\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 690,
+        "y": 400,
+        "wires": [
+            [
+                "230c6e4cfd774bb5",
+                "f04550fa22f1262f"
+            ]
+        ]
+    },
+    {
+        "id": "1c05926bfd5c1f43",
+        "type": "json",
+        "z": "3b781ccbf12f8cad",
+        "name": "Datos de flujo de agua",
+        "property": "payload",
+        "action": "obj",
+        "pretty": false,
+        "x": 440,
+        "y": 160,
+        "wires": [
+            [
+                "209d86b5970de237",
+                "d3704812ba7a0e8b",
+                "e98ab284994c5953"
+            ]
+        ]
+    },
+    {
+        "id": "02e710277b038167",
+        "type": "ui_text_input",
+        "z": "3b781ccbf12f8cad",
+        "name": "",
+        "label": "Hora Inicio",
+        "tooltip": "",
+        "group": "7de9bc542d2507ae",
+        "order": 10,
+        "width": 4,
+        "height": 1,
+        "passthru": true,
+        "mode": "time",
+        "delay": 300,
+        "topic": "hora_inicio",
+        "sendOnBlur": true,
+        "className": "",
+        "topicType": "str",
+        "x": 770,
+        "y": 220,
+        "wires": [
+            [
+                "d5bff1735d4dea14"
+            ]
+        ],
+        "icon": "node-red/timer.svg"
+    },
+    {
+        "id": "f2b4449c0db1a274",
+        "type": "ui_text_input",
+        "z": "3b781ccbf12f8cad",
+        "name": "",
+        "label": "Hora Fin",
+        "tooltip": "",
+        "group": "7de9bc542d2507ae",
+        "order": 11,
+        "width": 4,
+        "height": 1,
+        "passthru": true,
+        "mode": "time",
+        "delay": 300,
+        "topic": "hora_fin",
+        "sendOnBlur": true,
+        "className": "",
+        "topicType": "str",
+        "x": 780,
+        "y": 260,
+        "wires": [
+            [
+                "d5bff1735d4dea14"
+            ]
+        ],
+        "icon": "node-red/timer.svg"
+    },
+    {
+        "id": "2a1e940b55031977",
+        "type": "ui_text_input",
+        "z": "3b781ccbf12f8cad",
+        "name": "",
+        "label": "Tiempo de fuga",
+        "tooltip": "",
+        "group": "7de9bc542d2507ae",
+        "order": 14,
+        "width": 4,
+        "height": 1,
+        "passthru": true,
+        "mode": "number",
+        "delay": 300,
+        "topic": "duracion_valor",
+        "sendOnBlur": true,
+        "className": "",
+        "topicType": "str",
+        "x": 760,
+        "y": 300,
+        "wires": [
+            [
+                "d5bff1735d4dea14"
+            ]
+        ]
+    },
+    {
+        "id": "ab52f9bb55730676",
+        "type": "ui_dropdown",
+        "z": "3b781ccbf12f8cad",
+        "name": "",
+        "label": "Unidad",
+        "tooltip": "",
+        "place": "Select option",
+        "group": "7de9bc542d2507ae",
+        "order": 15,
+        "width": 4,
+        "height": 1,
+        "passthru": true,
+        "multiple": false,
+        "options": [
+            {
+                "label": "Segundos",
+                "value": "Segundos",
+                "type": "str"
+            },
+            {
+                "label": "Minutos",
+                "value": "Minutos",
+                "type": "str"
+            },
+            {
+                "label": "Horas",
+                "value": "Horas",
+                "type": "str"
+            }
+        ],
+        "payload": "",
+        "topic": "duracion_unidad",
+        "topicType": "str",
+        "className": "",
+        "x": 780,
+        "y": 340,
+        "wires": [
+            [
+                "d5bff1735d4dea14"
+            ]
+        ]
+    },
+    {
+        "id": "b072eb86c60c1a3f",
+        "type": "ui_button",
+        "z": "3b781ccbf12f8cad",
+        "name": "",
+        "group": "7de9bc542d2507ae",
+        "order": 18,
+        "width": 3,
+        "height": 1,
+        "passthru": false,
+        "label": "Guardar cambios",
+        "tooltip": "",
+        "color": "",
+        "bgcolor": "",
+        "className": "",
+        "icon": "",
+        "payload": "",
+        "payloadType": "str",
+        "topic": "guardar",
+        "topicType": "str",
+        "x": 330,
+        "y": 480,
+        "wires": [
+            [
+                "1ea8626963be4fe4"
+            ]
+        ]
+    },
+    {
+        "id": "85dfb90ebee53ccb",
+        "type": "ui_text",
+        "z": "3b781ccbf12f8cad",
+        "group": "7de9bc542d2507ae",
+        "order": 21,
+        "width": 8,
+        "height": 1,
+        "name": "Estado",
+        "label": "",
+        "format": "{{msg.payload}}",
+        "layout": "row-spread",
+        "className": "",
+        "style": false,
+        "font": "",
+        "fontSize": 16,
+        "color": "#000000",
+        "x": 680,
+        "y": 480,
+        "wires": []
+    },
+    {
+        "id": "d5bff1735d4dea14",
+        "type": "function",
+        "z": "3b781ccbf12f8cad",
+        "name": "Inputs Horarios",
+        "func": "function extraerHora(valor) {\n    if (valor === null || valor === undefined || valor === '') return null;\n    var str = String(valor).trim();\n    \n    // Si ya viene como HH:MM\n    if (/^\\d{1,2}:\\d{2}$/.test(str)) {\n        var partes = str.split(':');\n        return partes[0].padStart(2, '0') + ':' + partes[1];\n    }\n    \n    // Si viene como milisegundos (lo que envía el dashboard time picker)\n    var num = Number(str);\n    if (!isNaN(num) && num >= 0) {\n        var totalSegundos = Math.floor(num / 1000);\n        var totalMinutos  = Math.floor(totalSegundos / 60);\n        var h = Math.floor(totalMinutos / 60) % 24;\n        var m = totalMinutos % 60;\n        node.warn(\"extraerHora | raw=\" + num + \" → \" + h + \":\" + m);\n        return h.toString().padStart(2, '0') + ':' + m.toString().padStart(2, '0');\n    }\n    return null;\n}\n\nif (msg.topic === 'hora_inicio') {\n    var h = extraerHora(msg.payload);\n    flow.set('hora_inicio', h);\n    node.warn(\"hora_inicio guardada: \" + h);\n}\nif (msg.topic === 'hora_fin') {\n    var hf = extraerHora(msg.payload);\n    flow.set('hora_fin', hf);\n    node.warn(\"hora_fin guardada: \" + hf);\n}\nif (msg.topic === 'duracion_valor') {\n    flow.set('duracion_valor', Number(msg.payload));\n}\nif (msg.topic === 'duracion_unidad') {\n    flow.set('duracion_unidad', msg.payload);\n}\n\nreturn null;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1000,
+        "y": 280,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "1ea8626963be4fe4",
+        "type": "function",
+        "z": "3b781ccbf12f8cad",
+        "name": "function guardar",
+        "func": "var horaInicio = flow.get('hora_inicio');\nvar horaFin    = flow.get('hora_fin');\nvar durValor   = flow.get('duracion_valor');\nvar durUnidad  = flow.get('duracion_unidad');\n\nnode.warn(\"GUARDANDO | inicio=\" + horaInicio + \" | fin=\" + horaFin +\n          \" | valor=\" + durValor + \" | unidad=\" + durUnidad);\n\nif (!horaInicio || !horaFin || !durValor || !durUnidad) {\n    msg.payload = '⚠️ Completa todos los campos antes de guardar';\n    return msg;\n}\n\nvar mult = 1;\nif (durUnidad === 'Minutos') mult = 60;\nif (durUnidad === 'Horas')   mult = 3600;\n\nflow.set('duracion_fuga',   durValor * mult);\nflow.set('reset_deteccion', Date.now());\n\nmsg.payload = '✅ Guardado: ' + horaInicio + ' - ' + horaFin +\n              ' | Fuga tras: ' + durValor + ' ' + durUnidad;\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 520,
+        "y": 480,
+        "wires": [
+            [
+                "85dfb90ebee53ccb"
+            ]
+        ]
+    },
+    {
+        "id": "7d8315a1bfde8165",
+        "type": "ui_text",
+        "z": "3b781ccbf12f8cad",
+        "group": "7de9bc542d2507ae",
+        "order": 2,
+        "width": 8,
+        "height": 2,
+        "name": "",
+        "label": "Nota",
+        "format": "Ingresa el horario en que nadie usa agua y el tiempo límite de flujo. El sistema enviará un correo si detecta consumo fuera de lo normal.",
+        "layout": "col-center",
+        "className": "",
+        "style": false,
+        "font": "Arial,Arial,Helvetica,sans-serif",
+        "fontSize": 16,
+        "color": "#000000",
+        "x": 870,
+        "y": 580,
+        "wires": []
+    },
+    {
+        "id": "144f6f9a69ffff43",
+        "type": "inject",
+        "z": "3b781ccbf12f8cad",
+        "name": "Leer config cada 5s",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "5",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "1",
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 440,
+        "y": 640,
+        "wires": [
+            [
+                "48b720f5c320f2c5"
+            ]
+        ]
+    },
+    {
+        "id": "48b720f5c320f2c5",
+        "type": "function",
+        "z": "3b781ccbf12f8cad",
+        "name": "Leer configuración activa",
+        "func": "// ─── CORRECCIÓN #4: Leer desde flow.get (unificado) ───\nvar horaInicio = flow.get('hora_inicio');\nvar horaFin    = flow.get('hora_fin');\nvar durValor   = flow.get('duracion_valor');\nvar durUnidad  = flow.get('duracion_unidad');\n\nif (!horaInicio || !horaFin || !durValor || !durUnidad) {\n    msg.payload = 'Sin configuración guardada. Ingresa los datos y presiona Guardar cambios.';\n} else {\n    msg.payload =\n        'Configuración activa:<br>' +\n        '* Horario de evaluación: ' + horaInicio + ' → ' + horaFin + '<br>' +\n        '* Tiempo para alerta de fuga: ' + durValor + ' ' + durUnidad;\n}\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 680,
+        "y": 640,
+        "wires": [
+            [
+                "5503d212569b7988"
+            ]
+        ]
+    },
+    {
+        "id": "5503d212569b7988",
+        "type": "ui_text",
+        "z": "3b781ccbf12f8cad",
+        "group": "7de9bc542d2507ae",
+        "order": 7,
+        "width": 8,
+        "height": 1,
+        "name": "Configuración Activa",
+        "label": "",
+        "format": "{{msg.payload}}",
+        "layout": "row-left",
+        "className": "",
+        "style": true,
+        "font": "Arial,Arial,Helvetica,sans-serif",
+        "fontSize": 15,
+        "color": "#1a6e3c",
+        "x": 920,
+        "y": 640,
+        "wires": []
+    },
+    {
+        "id": "015d1263ceb2e156",
+        "type": "debug",
+        "z": "3b781ccbf12f8cad",
+        "name": "debug alerta",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1030,
+        "y": 200,
+        "wires": []
+    },
+    {
+        "id": "6ae6bcd35149962a",
+        "type": "mqtt in",
+        "z": "3b781ccbf12f8cad",
+        "name": "MQTT Flujo Agua",
+        "topic": "sensor/flujo",
+        "qos": "0",
+        "datatype": "auto-detect",
+        "broker": "e6e29d829850ee98",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 200,
+        "y": 160,
+        "wires": [
+            [
+                "1c05926bfd5c1f43"
+            ]
+        ]
+    },
+    {
+        "id": "0928708e60c10a82",
+        "type": "e-mail",
+        "z": "3b781ccbf12f8cad",
+        "server": "smtp.gmail.com",
+        "port": "465",
+        "authtype": "BASIC",
+        "saslformat": true,
+        "token": "oauth2Response.access_token",
+        "secure": true,
+        "tls": true,
+        "name": "laurasofiaayalamartinez@gmail.com",
+        "dname": "Enviar Alerta a Gmail",
+        "x": 1060,
+        "y": 160,
+        "wires": []
+    },
+    {
+        "id": "a77dbd85bfa4eb66",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 1,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "aa8023ccee92ac33",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 3,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "61e2f65e9dc27775",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 4,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "26460c91c68fb2d0",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 5,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "fc2473d6dacc4fcd",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 6,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "59e0b26cdf269c21",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 8,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "84542928016b058a",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 9,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "d4c8e3e1d316f8d4",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 12,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "5b67f74abbd7a94d",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 13,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "a19e2d06353af451",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 16,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "7e8f84dc7f17b7b1",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 17,
+        "width": 6,
+        "height": 1
+    },
+    {
+        "id": "7642d902f54ed88b",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 19,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "cc5ff4dfa5804dd6",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 20,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "73545e999adf8d0b",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 22,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "29638a5dfbc19e4c",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 23,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "d3470c3c1715f51b",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 25,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "8c673f8181fc234d",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 26,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "b4b9884f4addc5c3",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 27,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "3cb3e4b4b00b2822",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 28,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "fbc4cee01b943b7a",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 29,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "3ae60cc37a170333",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 30,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "f5c4618ea3d5f605",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 31,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "a5efc1c704ab1f8c",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 32,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "e53b806e7378b091",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 33,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "5bdf59fb8033c5be",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 34,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "7a861ef539531ba1",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 36,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "855e399e406667d1",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 37,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "58b952f004877862",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 38,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "68f953652dbf9f08",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 39,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "54f041a1ca814999",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 40,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "c1b78c246f158d40",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 41,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "cea24bf5c53027f4",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 42,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "06865d2772f86080",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 43,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "f893d377de63d5c6",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 44,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "d7fa7db69eaf1d12",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 45,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "76ea6062cf2497d8",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 46,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "4475b3f757ec5ecb",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 47,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "97239c77d04042c4",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 48,
+        "width": 1,
+        "height": 1
+    },
+    {
+        "id": "3b8eec9587f5a6af",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 49,
+        "width": 10,
+        "height": 1
+    },
+    {
+        "id": "3dc7e8393a0296be",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 50,
+        "width": 3,
+        "height": 1
+    },
+    {
+        "id": "2fb8453c0a6839c1",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 52,
+        "width": 3,
+        "height": 1
+    },
+    {
+        "id": "2ef512893cf386a7",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 53,
+        "width": 3,
+        "height": 1
+    },
+    {
+        "id": "9226bc1d2e86e7d6",
+        "type": "ui_spacer",
+        "z": "3b781ccbf12f8cad",
+        "name": "spacer",
+        "group": "7de9bc542d2507ae",
+        "order": 54,
+        "width": 3,
+        "height": 1
+    },
+    {
+        "id": "22d1113c695db1b2",
+        "type": "influxdb",
+        "hostname": "52.15.132.74",
+        "port": 8086,
+        "protocol": "http",
+        "database": "proyectoFlujoDB",
+        "name": "bdInfluxdb",
+        "usetls": false,
+        "tls": "",
+        "influxdbVersion": "2.0",
+        "url": "http://3.150.188.167:8086",
+        "timeout": "60",
+        "rejectUnauthorized": false
+    },
+    {
+        "id": "7de9bc542d2507ae",
+        "type": "ui_group",
+        "name": "Flujo de Agua",
+        "tab": "d7e9496b456d87ec",
+        "order": 1,
+        "disp": true,
+        "width": 10,
+        "collapse": false,
+        "className": ""
+    },
+    {
+        "id": "e6e29d829850ee98",
+        "type": "mqtt-broker",
+        "name": "BrokerFlujoAgua",
+        "broker": "3.150.188.167",
+        "port": 1883,
+        "clientid": "NodeRedFlujoAgua",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": "4",
+        "keepalive": 60,
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "d7e9496b456d87ec",
+        "type": "ui_tab",
+        "name": "Home",
+        "icon": "dashboard",
+        "disabled": false,
+        "hidden": false
+    },
+    {
+        "id": "cf84135f74184b37",
+        "type": "global-config",
+        "env": [],
+        "modules": {
+            "node-red-contrib-influxdb": "0.7.0",
+            "node-red-dashboard": "3.6.6",
+            "node-red-node-email": "5.2.1"
+        }
+    }
+]
